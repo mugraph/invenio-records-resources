@@ -9,12 +9,13 @@
 """Query parser for lucene query string syntax."""
 
 from .query import QueryParser
-from .suggest import CompositeSuggestQueryParser, SuggestQueryParser
+from .suggest import CompositeSuggestQueryParser, SuggestQueryParser, NamedSuggestQueryParser
 from .transformer import FieldValueMapper, SearchFieldTransformer
 
 __all__ = (
     "CompositeSuggestQueryParser",
     "FieldValueMapper",
+    "NamedSuggestQueryParser",
     "QueryParser",
     "SearchFieldTransformer",
     "SuggestQueryParser",

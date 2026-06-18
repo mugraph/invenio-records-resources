@@ -13,6 +13,26 @@ from functools import partial
 from invenio_search.engine import dsl
 
 from .query import QueryParser
+from werkzeug.local import LocalProxy
+
+def extract_subtypes(filter_field, query_str):
+    """Extract the filtering subtype(s) from query_str.
+
+    Returns a tuple (<subtype(s)>, <rest of original query string>).
+    """
+    if filter_field is None:
+        # If no filter field is set, we do not extract subtypes.
+        return [], query_str
+    parts = query_str.split(":", 1)
+    # If query is None, it means no subtype was specified.
+    if len(parts) == 1:
+        subtypes = []
+        query_str = parts[0]
+    else:
+        subtypes, query_str = parts[0], parts[1]
+        # Multiple subtypes can be specified, separated by commas.
+        subtypes = subtypes.split(",")
+    return (subtypes, query_str)
 
 
 class SuggestQueryParser(QueryParser):
@@ -109,7 +129,7 @@ class CompositeSuggestQueryParser(QueryParser):
     def parse(self, query_str):
         """Parse and build the query."""
         should_clauses = []
-        subtypes, query_str = self.extract_subtypes(query_str)
+        subtypes, query_str = extract_subtypes(self.filter_field, query_str)
 
         for clause in self.clauses:
             params = {**self.extra_params, **clause}
@@ -136,21 +156,79 @@ class CompositeSuggestQueryParser(QueryParser):
 
         return multi_match_query
 
-    def extract_subtypes(self, query_str):
-        """Extract the filtering subtype(s) from query_str.
 
-        Returns a tuple (<subtype(s)>, <rest of original query string>).
-        """
-        if self.filter_field is None:
-            # If no filter field is set, we do not extract subtypes.
-            return [], query_str
-        parts = query_str.split(":", 1)
-        # If query is None, it means no subtype was specified.
-        if len(parts) == 1:
-            subtypes = []
-            query_str = parts[0]
-        else:
-            subtypes, query_str = parts[0], parts[1]
-            # Multiple subtypes can be specified, separated by commas.
-            subtypes = subtypes.split(",")
-        return (subtypes, query_str)
+class NamedSuggestQueryParser(QueryParser):
+    """Suggest parser with match named query support."""
+
+    def __init__(
+        self,
+        identity=None,
+        extra_params=None,
+        tree_transformer_cls=None,
+        filter_field=None,
+    ):
+        super().__init__(
+            identity=identity,
+            extra_params=extra_params,
+            tree_transformer_cls=tree_transformer_cls,
+        )
+
+        self.extra_params.setdefault("type", "bool_prefix")
+        self.filter_field = filter_field
+        self.named_fields = extra_params.get("named_fields", {})
+
+    @classmethod
+    def factory(
+        cls,
+        tree_transformer_cls=None,
+        filter_field=None,
+        **extra_params,
+    ):
+        return partial(
+            cls,
+            tree_transformer_cls=tree_transformer_cls,
+            filter_field=filter_field,
+            extra_params=extra_params,
+        )
+
+    def _resolve_fields(self, fields):
+        resolved = []
+        for f in fields:
+            if isinstance(f, LocalProxy):
+                f = f._get_current_object()
+            if callable(f):
+                f = f()
+            resolved.append(f)
+        return resolved
+
+    def parse(self, query_str):
+        subtypes, query_str = extract_subtypes(self.filter_field, query_str)
+        should_clauses = []
+        for field_name, fields in self.named_fields.items():
+            should_clauses.append(
+                dsl.Q(
+                    "multi_match",
+                    query=query_str,
+                    fields=self._resolve_fields(fields),
+                    type=self.extra_params["type"],
+                    _name=field_name,
+                )
+            )
+
+        named_query = dsl.Q(
+            "bool",
+            should=should_clauses,
+            minimum_should_match=1,
+        )
+
+        if subtypes:
+            # If subtypes are provided, add a terms filter clause to the query to restrict results to those subtypes.
+            term_query = dsl.Q("terms", **{self.filter_field: subtypes})
+            if query_str:
+                # If a query string is provided, we combine the named query with the term query.
+                named_query = named_query & term_query
+            else:
+                # If no query string is provided, we only filter by subtypes.
+                named_query = term_query
+
+        return named_query
